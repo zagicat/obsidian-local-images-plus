@@ -974,9 +974,12 @@ export default class LocalImagesPlugin extends Plugin {
                 } else if (oldpath != newpath) {
 
                   logError("Renaming existing: " + oldpath)
+                  const collisionDir = this.settings.useSharding
+                    ? pathJoin([mdir, path.basename(newpath)[0].toLowerCase()])
+                    : mdir
                   let inc = 1
                   while (await this.app.vault.adapter.exists(newpath)) {
-                    newpath = pathJoin([mdir, `(${inc}) ` + cFileName(path.basename(el.link))])
+                    newpath = pathJoin([collisionDir, `(${inc}) ` + cFileName(path.basename(el.link))])
                     inc++
                   }
 
