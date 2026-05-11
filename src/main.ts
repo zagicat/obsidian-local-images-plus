@@ -1105,7 +1105,7 @@ export default class LocalImagesPlugin extends Plugin {
   processModifiedQueue = async () => {
     const iteration = this.modifiedQueue.iterationQueue();
     for (const page of iteration) {
-      this.processPage(page, false);
+      await this.processPage(page, false);
     }
   };
 
