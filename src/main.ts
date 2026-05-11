@@ -509,7 +509,15 @@ export default class LocalImagesPlugin extends Plugin {
             showBalloon("The attachment folder " + oldRootdir + " does not exist!", this.settings.showNotifications)
             return
           }
-          const allAttachments = await this.app.vault.getAbstractFileByPath(oldRootdir)?.children
+          const topLevelChildren = this.app.vault.getAbstractFileByPath(oldRootdir)?.children ?? [];
+          let allAttachments = [];
+          for (const item of topLevelChildren) {
+            if (item.children !== undefined && this.settings.useSharding) {
+              allAttachments.push(...(item.children ?? []));
+            } else {
+              allAttachments.push(item);
+            }
+          }
           const metaCache = this.app.metadataCache.getFileCache(noteFile)
           const embeds = metaCache?.embeds
           const links = metaCache?.links
@@ -939,7 +947,13 @@ export default class LocalImagesPlugin extends Plugin {
                 newlink = await getRDir(note, this.settings, newpath)
               }
 
-
+              if (this.settings.useSharding) {
+                const shard = path.basename(newpath)[0].toLowerCase();
+                const shardedDir = pathJoin([mdir, shard]);
+                await this.ensureFolderExists(shardedDir);
+                newpath = pathJoin([shardedDir, path.basename(newpath)]);
+                newlink = await getRDir(note, this.settings, newpath);
+              }
 
               if (await this.app.vault.adapter.exists(newpath)) {
 

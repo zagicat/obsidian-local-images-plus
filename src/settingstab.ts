@@ -530,6 +530,19 @@ export default class SettingTab extends PluginSettingTab {
             )
 
 
+        new Setting(containerEl)
+            .setName("Shard attachment subfolders")
+            .setDesc("Place attachments in a single-character subfolder (first character of filename). Mirrors the vault sharding convention. Does not reorganize existing files.")
+            .setClass("media_folder_set")
+            .addToggle((toggle) =>
+                toggle
+                    .setValue(this.plugin.settings.useSharding)
+                    .onChange(async (value) => {
+                        this.plugin.settings.useSharding = value
+                        await this.plugin.saveSettings()
+                    })
+            )
+
         containerEl.createEl("h3", { text: "Troubleshooting" })
         new Setting(containerEl)
             .setName("Debug")

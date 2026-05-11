@@ -103,7 +103,7 @@ export function imageTagProcessor(app: Plugin,
       try {
 
 
-        const { fileName, needWrite } = await lock.acquire(match, async function () {
+        const { fileName, needWrite, shardDir } = await lock.acquire(match, async function () {
 
 
           const parsedUrl = new URL(link);
@@ -120,17 +120,19 @@ export function imageTagProcessor(app: Plugin,
             logError("arbuf: ")
             logError(fileData)
           }
-          const { fileName, needWrite } = await chooseFileName(
+          const { fileName, needWrite, shardDir } = await chooseFileName(
             app.app.vault.adapter,
             mediaDir,
             link,
             fileData,
             settings
           );
-          return { fileName, needWrite };
+          return { fileName, needWrite, shardDir };
         });
 
-
+        if (settings.useSharding) {
+          await app.ensureFolderExists(shardDir);
+        }
 
         if (needWrite && fileName) {
           await app.app.vault.createBinary(fileName, fileData);
@@ -315,7 +317,7 @@ async function chooseFileName(
   link: string,
   contentData: ArrayBuffer,
   settings: ISettings
-): Promise<{ fileName: string; needWrite: boolean }> {
+): Promise<{ fileName: string; needWrite: boolean; shardDir: string }> {
   const parsedUrl = new URL(link);
   const ignoredExt = settings.ignoredExt.split("|");
   let fileExt = await getFileExt(contentData, parsedUrl.pathname);
@@ -324,12 +326,12 @@ async function chooseFileName(
 
 
   if (fileExt == "unknown" && !settings.downUnknown) {
-    return { fileName: "", needWrite: false };
+    return { fileName: "", needWrite: false, shardDir: dir };
   }
 
 
   if (ignoredExt.includes(fileExt)) {
-    return { fileName: "", needWrite: false };
+    return { fileName: "", needWrite: false, shardDir: dir };
   }
 
 
@@ -337,9 +339,12 @@ async function chooseFileName(
 
   const baseName = md5Sig(contentData);
 
+  const shardChar = baseName[0];
+  const effectiveDir = settings.useSharding ? pathJoin([dir, shardChar]) : dir;
+
   let needWrite = true;
   let fileName = "";
-  const suggestedName = pathJoin([dir, cFileName(`${baseName}` + `.${fileExt}`)]);
+  const suggestedName = pathJoin([effectiveDir, cFileName(`${baseName}` + `.${fileExt}`)]);
   if (await adapter.exists(suggestedName, false)) {
     const fileData = await adapter.readBinary(suggestedName);
     const existing_file_md5 = md5Sig(fileData);
@@ -348,7 +353,7 @@ async function chooseFileName(
       needWrite = false;
     }
     else {
-      fileName = pathJoin([dir, cFileName(Math.random().toString(9).slice(2,) + `.${fileExt}`)]);
+      fileName = pathJoin([effectiveDir, cFileName(Math.random().toString(9).slice(2,) + `.${fileExt}`)]);
     }
 
   } else {
@@ -362,7 +367,7 @@ async function chooseFileName(
 
   //linkHashes.ensureHashGenerated(link, contentData);
 
-  return { fileName, needWrite };
+  return { fileName, needWrite, shardDir: effectiveDir };
 }
 
 

@@ -87,7 +87,8 @@ export interface ISettings {
   DateFormat: string;
   ImgCompressionType:string;
   ExcludedFoldersList:string;
-  ExcludedFoldersListRegexp: string
+  ExcludedFoldersListRegexp: string;
+  useSharding: boolean
 }
 
 export const DEFAULT_SETTINGS: ISettings = {
@@ -118,5 +119,6 @@ export const DEFAULT_SETTINGS: ISettings = {
   DateFormat: "YYYY MM DD",
   ImgCompressionType: "image/jpeg",
   ExcludedFoldersList: "",
-  ExcludedFoldersListRegexp: ""
+  ExcludedFoldersListRegexp: "",
+  useSharding: false
 };
