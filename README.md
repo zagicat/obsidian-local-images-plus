@@ -23,6 +23,7 @@ Obsidian Local Images Plus is a plugin for [Obsidian](https://obsidian.md/)
 - Converting PNG images to JPEG images with various quality
 - Attachments de-dulication by using MD5 hashing algorithm
 - Removing orphaned attachments from vault
+- Optional attachment folder sharding to avoid large flat directories
 
 
 
@@ -114,6 +115,27 @@ The first one searches orphans in the folder next to the active note, while the 
 All attachment names are generated according to MD5, therefore they are pretty unique within the vault.        
 
 This means you can place an attachment file anywhere within your vault, replace the absolute path in a tag with the file name and Obsidian will still show it in your note.
+
+
+## Attachment folder sharding
+
+By default, all attachments for a note land in a single flat folder (e.g. `_resources/MyNote/`). On macOS, filesystem and Obsidian indexer performance degrades noticeably once a folder exceeds roughly 20,000 items. Heavy vaults with many clippings can hit this limit over time.
+
+Enabling **Shard attachment subfolders** (in the Media folder settings) distributes attachments into single-character subfolders named by the first character of the filename:
+
+```
+_resources/MyNote/
+  a/
+    a3f4c2...d8.jpg
+  b/
+    b9d3e1...f0.webp
+  f/
+    f00ba3...cc.jpg
+```
+
+When using MD5 naming (the default), filenames are hex hashes, so the first character is always one of `0–9` or `a–f` — 16 buckets with roughly uniform distribution. A vault with 160,000 attachments gets ~10,000 per bucket instead of one enormous flat folder.
+
+**This setting is disabled by default** so existing vaults are unaffected. Enabling it does not reorganize existing files — only newly downloaded or moved attachments go into shard subfolders. Existing links continue to resolve correctly.
  
 
 
