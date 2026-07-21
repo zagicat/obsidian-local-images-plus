@@ -1,7 +1,7 @@
 import path, { resolve } from "path";
 import { fromBuffer } from "file-type";
 import isSvg from "is-svg";
-import md5 from "crypto-js/md5";
+import { createHash } from "crypto";
 const fs2 = require('fs').promises;
 import fs from "fs";
  
@@ -21,6 +21,14 @@ import {
   Notice,
   TFile
 } from "obsidian";
+
+import { pLimit } from "./downloadPool";
+
+// How many attachment tags are processed at once. Bounding this keeps peak
+// memory flat (one buffered download per slot instead of every image in the
+// note held in memory simultaneously) and stops the renderer from being
+// saturated when a clipped article carries dozens of images.
+const PROCESS_CONCURRENCY = 3;
  
 
 //import { TIMEOUT } from "dns";
@@ -69,16 +77,22 @@ export function md5Sig(contentData: ArrayBuffer = undefined) {
 
   try {
 
+    // Node's native crypto is much faster than the crypto-js implementation
+    // this used historically. The chunk-sampling + lossy utf-8 decode is kept
+    // byte-identical because existing vault attachments are NAMED by this
+    // hash — changing the algorithm would orphan every previously
+    // downloaded file on reprocess.
     var dec = new TextDecoder("utf-8");
     const arrMid = Math.round(contentData.byteLength / 2);
     const chunk = 15000;
-    const signature = md5([
+    const joined = [
       contentData.slice(0, chunk),
       contentData.slice(arrMid, arrMid + chunk),
       contentData.slice(-chunk)
-    ].map(x => dec.decode(x)).join()
-    ).toString();
- 
+    ].map(x => dec.decode(x)).join();
+
+    const signature = createHash("md5").update(joined, "utf8").digest("hex");
+
     return signature + "_MD5";
   }
   catch (e) {
@@ -146,16 +160,21 @@ export async function replaceAsync(str: any, regex: Array<RegExp>, asyncFn: any)
 
   })
 
+  const limit = pLimit(PROCESS_CONCURRENCY);
   for (var key in dictPatt) {
-    const promise = asyncFn(key, dictPatt[key][0], dictPatt[key][1], dictPatt[key][2], dictPatt[key][3]);
-    logError(promise, true);
+    const args = dictPatt[key];
+    const promise = limit(() => asyncFn(key, args[0], args[1], args[2], args[3]));
     promises.push(promise);
   }
 
   const data = await Promise.all(promises);
   logError("Promises: ");
   logError(data, true);
-  //  return str.replace((reg: RegExp, str: String) => { 
+
+  // Replacement pairs [search, replace] — returned so the caller can
+  // re-apply them atomically (vault.process) against the file's current
+  // content instead of overwriting with a stale snapshot.
+  const pairs: Array<[string, string]> = [];
 
   data.forEach((element) => {
 
@@ -163,6 +182,7 @@ export async function replaceAsync(str: any, regex: Array<RegExp>, asyncFn: any)
 
       logError("el: " + element[0] + "  el2: " + element[1] + element[2]);
       str = str.replaceAll(element[0], element[1] + element[2]);
+      pairs.push([element[0], element[1] + element[2]]);
       filesArr.push(element[1]);
     }
     else {
@@ -171,9 +191,7 @@ export async function replaceAsync(str: any, regex: Array<RegExp>, asyncFn: any)
 
   });
 
-  return [str, errorflag, filesArr];
-
-  //  return str.replace( () => data.shift());
+  return [str, errorflag, filesArr, pairs];
 }
 
 export function isUrl(link: string) {
@@ -349,47 +367,44 @@ export function encObsURI(e: string) {
 
 
 /**
- * https://github.com/mnaoumov/obsidian-dev-utils (modified)
+ * Re-encode an image blob to the given type/quality.
+ *
+ * Uses createImageBitmap + OffscreenCanvas.convertToBlob: fully async (the
+ * encode does not block the renderer the way canvas.toDataURL did), no
+ * base64/data-URL round-trips, and a decode failure resolves to null
+ * instead of hanging forever.
+ *
  * @param blob - The Blob object to convert.
  * @param imgQuality - The quality of the image (0 to 1).
- * @returns A promise that resolves to an ArrayBuffer.
+ * @param imgType - Target mime type, e.g. "image/jpeg" or "image/webp".
+ * @returns ArrayBuffer of the converted image, or null on failure.
  */
-export async function blobToJpegArrayBuffer(blob: Blob, imgQuality: number, imgType: string = "image/jpeg" ): Promise<ArrayBuffer> {
-  return new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onloadend = (): void => {
-      const image = new Image();
-      image.onload = (): void => {
-        const canvas = document.createElement('canvas');
-        const context = canvas.getContext('2d');
-        if (!context) {
-          throw new Error('Could not get 2D context.');
-        }
-        const imageWidth = image.width;
-        const imageHeight = image.height;
-        let data = '';
+export async function blobToJpegArrayBuffer(blob: Blob, imgQuality: number, imgType: string = "image/jpeg"): Promise<ArrayBuffer | null> {
+  let bitmap: ImageBitmap | null = null;
+  try {
+    bitmap = await createImageBitmap(blob);
 
-        canvas.width = imageWidth;
-        canvas.height = imageHeight;
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const context = canvas.getContext("2d");
+    if (!context) {
+      throw new Error("Could not get 2D context.");
+    }
 
-        context.fillStyle = '#fff';
-        context.fillRect(0, 0, imageWidth, imageHeight);
-        context.save();
+    // White backdrop so transparent PNG regions don't turn black in JPEG.
+    context.fillStyle = "#fff";
+    context.fillRect(0, 0, bitmap.width, bitmap.height);
+    context.drawImage(bitmap, 0, 0);
 
-        context.translate(imageWidth / 2, imageHeight / 2);
-        context.drawImage(image, 0, 0, imageWidth, imageHeight, -imageWidth / 2, -imageHeight / 2, imageWidth, imageHeight);
-        context.restore();
-
-        data = canvas.toDataURL(imgType, imgQuality);
-
-        const arrayBuffer =  base64ToBuff(data);
-        resolve(arrayBuffer);
-      };
-
-      image.src = reader.result as string;
-    };
-    reader.readAsDataURL(blob);
-  });
+    const outBlob = await canvas.convertToBlob({ type: imgType, quality: imgQuality });
+    return await outBlob.arrayBuffer();
+  }
+  catch (e) {
+    logError("Image conversion failed: " + e, false);
+    return null;
+  }
+  finally {
+    bitmap?.close();
+  }
 }
 
  

@@ -29,7 +29,7 @@ import {
 } from "./config";
 
 
-import AsyncLock from "async-lock";
+import { InFlightMap } from "./downloadPool";
 import moment from "moment";
 
 export function imageTagProcessor(app: Plugin,
@@ -39,6 +39,105 @@ export function imageTagProcessor(app: Plugin,
 ) {
 
   const unique = Math.random().toString(16).slice(2,);
+
+  // Deduplicates concurrent fetch+write work by URL: the same image linked
+  // from several tags in one note is downloaded and written exactly once.
+  const inFlight = new InFlightMap<string | null>();
+
+  // Downloads (or reads) the linked content and writes it into the vault.
+  // Returns the vault-relative file name, or null on failure.
+  async function acquireAttachment(link: string, mediaDir: string): Promise<string | null> {
+
+    let fpath;
+    let fileData: ArrayBuffer;
+    const opsys = process.platform;
+    const protocol = link.slice(0, 5);
+
+    if (protocol == "data:") {
+      logError("ReadBase64: \r\n" + fpath, false);
+      fileData = await base64ToBuff(link);
+    }
+    else
+
+      if (protocol == "file:") {
+        logError("Readlocal: \r\n" + fpath, false);
+        if (SUPPORTED_OS.win.includes(opsys)) { fpath = link.replace("file:///", ""); }
+        else if (SUPPORTED_OS.unix.includes(opsys)) { fpath = link.replace("file://", ""); }
+        else { fpath = link.replace("file://", ""); }
+
+        fileData = await readFromDisk(fpath);
+        if (fileData === null) {
+          fileData = await readFromDisk(decodeURI(fpath));
+        }
+      }
+      else {
+        //Try to download several times
+        let trycount = 0;
+        while (trycount < settings.tryCount) {
+          fileData = await downloadImage(link);
+          logError("\r\n\nDownloading (try): " + trycount + "\r\n\n");
+          if (fileData !== null) { break; }
+          trycount++;
+        }
+      }
+    if (fileData === null) {
+      logError("Cannot get an attachment content!", false);
+      return null;
+    }
+
+
+    if (Math.round(fileData.byteLength / 1024) < settings.filesizeLimit) {
+      logError("Lower limit of the file size!", false);
+      return null;
+    }
+
+    const parsedUrl = new URL(link);
+
+    let fileExt = await getFileExt(fileData, parsedUrl.pathname);
+
+
+    if (fileExt == "png" && settings.PngToJpeg) {
+
+      let compType = (settings.ImgCompressionType == "") ? "image/jpeg" : settings.ImgCompressionType;
+      const blob = new Blob([new Uint8Array(fileData)]);
+      const converted = await blobToJpegArrayBuffer(blob, settings.JpegQuality * 0.01, compType);
+      // On conversion failure keep the original bytes rather than dropping the attachment.
+      if (converted !== null) {
+        fileData = converted;
+      }
+    }
+
+    const { fileName, needWrite, shardDir } = await chooseFileName(
+      app.app.vault.adapter,
+      mediaDir,
+      link,
+      fileData,
+      settings
+    );
+
+    if (!fileName) {
+      return null;
+    }
+
+    if (settings.useSharding) {
+      await app.ensureFolderExists(shardDir);
+    }
+
+    if (needWrite) {
+      try {
+        await app.app.vault.createBinary(fileName, fileData);
+      } catch (error) {
+        // Content-addressed names: if the file already exists, its content is
+        // identical by construction — a concurrent writer simply got there
+        // first. That is success, not failure.
+        if (error.message !== "File already exists.") {
+          throw error;
+        }
+      }
+    }
+
+    return fileName;
+  }
 
   async function processImageTag(match: string,
     anchor: string,
@@ -54,91 +153,14 @@ export function imageTagProcessor(app: Plugin,
 
     try {
 
-      var lock = new AsyncLock();
-      let fpath;
-      let fileData: ArrayBuffer;
-      const opsys = process.platform;
       const mediaDir = await getMDir(app.app, noteFile, settings, defaultdir, unique);
       await app.ensureFolderExists(mediaDir);
+
+      const fileName = await inFlight.run(link, () => acquireAttachment(link, mediaDir));
+
       const protocol = link.slice(0, 5);
 
-      if (protocol == "data:") {
-        logError("ReadBase64: \r\n" + fpath, false);
-        fileData = await base64ToBuff(link);
-      }
-      else
-
-        if (protocol == "file:") {
-          logError("Readlocal: \r\n" + fpath, false);
-          if (SUPPORTED_OS.win.includes(opsys)) { fpath = link.replace("file:///", ""); }
-          else if (SUPPORTED_OS.unix.includes(opsys)) { fpath = link.replace("file://", ""); }
-          else { fpath = link.replace("file://", ""); }
-
-          fileData = await readFromDisk(fpath);
-          if (fileData === null) {
-            fileData = await readFromDisk(decodeURI(fpath));
-          }
-        }
-        else {
-          //Try to download several times
-          let trycount = 0;
-          while (trycount < settings.tryCount) {
-            fileData = await downloadImage(link);
-            logError("\r\n\nDownloading (try): " + trycount + "\r\n\n");
-            if (fileData !== null) { break; }
-            trycount++;
-          }
-        }
-      if (fileData === null) {
-        logError("Cannot get an attachment content!", false);
-        return null;
-      }
-
-
-      if (Math.round(fileData.byteLength / 1024) < settings.filesizeLimit) {
-        logError("Lower limit of the file size!", false);
-        return null;
-      }
-
-      try {
-
-
-        const { fileName, needWrite, shardDir } = await lock.acquire(match, async function () {
-
-
-          const parsedUrl = new URL(link);
-
-          let fileExt = await getFileExt(fileData, parsedUrl.pathname);
-
-
-          if (fileExt == "png" && settings.PngToJpeg) {
-
-
-            let compType = (settings.ImgCompressionType == "") ? "image/jpeg" : settings.ImgCompressionType;
-            const blob = new Blob([new Uint8Array(fileData)]);
-            fileData = await blobToJpegArrayBuffer(blob, settings.JpegQuality * 0.01, compType)
-            logError("arbuf: ")
-            logError(fileData)
-          }
-          const { fileName, needWrite, shardDir } = await chooseFileName(
-            app.app.vault.adapter,
-            mediaDir,
-            link,
-            fileData,
-            settings
-          );
-          return { fileName, needWrite, shardDir };
-        });
-
-        if (settings.useSharding) {
-          await app.ensureFolderExists(shardDir);
-        }
-
-        if (needWrite && fileName) {
-          await app.app.vault.createBinary(fileName, fileData);
-        }
-
-        if (fileName) {
+      if (fileName) {
 
           let shortName = "";
           const rdir = await getRDir(noteFile, settings, fileName, link);
@@ -182,15 +204,6 @@ export function imageTagProcessor(app: Plugin,
 
 
 
-        } else {
-          return null;
-        }
-
-      } catch (error) {
-        if (error.message === "File already exists.") {
-        } else {
-          throw error;
-        }
       }
 
       return null;
@@ -311,7 +324,7 @@ export async function getMDir(app: App,
 
 
 
-async function chooseFileName(
+export async function chooseFileName(
   adapter: DataAdapter,
   dir: string,
   link: string,
@@ -346,16 +359,11 @@ async function chooseFileName(
   let fileName = "";
   const suggestedName = pathJoin([effectiveDir, cFileName(`${baseName}` + `.${fileExt}`)]);
   if (await adapter.exists(suggestedName, false)) {
-    const fileData = await adapter.readBinary(suggestedName);
-    const existing_file_md5 = md5Sig(fileData);
-    if (existing_file_md5 === baseName) {
-      fileName = suggestedName;
-      needWrite = false;
-    }
-    else {
-      fileName = pathJoin([effectiveDir, cFileName(Math.random().toString(9).slice(2,) + `.${fileExt}`)]);
-    }
-
+    // Files are content-addressed: the name IS the content's md5, so an
+    // existing file with this name already holds identical bytes. Reading
+    // it back to re-hash and compare was redundant full-file I/O.
+    fileName = suggestedName;
+    needWrite = false;
   } else {
     fileName = suggestedName;
   }

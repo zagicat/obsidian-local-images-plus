@@ -132,10 +132,17 @@ export default class LocalImagesPlugin extends Plugin {
 
 
 
+    // Vault events are registered only after the workspace layout is ready:
+    // Obsidian fires 'create' for every existing file during startup
+    // indexing, which in a large vault means tens of thousands of spurious
+    // handler invocations. registerEvent() ties each handler's lifetime to
+    // the plugin, so reloads can't stack duplicate listeners.
+    this.app.workspace.onLayoutReady(() => {
+
     // Some file has been created
 
-    this.app.vault.on('create', async (file: TFile) => {
-      
+    this.registerEvent(this.app.vault.on('create', async (file: TFile) => {
+
       logError("New file created: " + file.path)
 
       if (this.ExemplaryOfMD(file.path) && !this.ThePathExcluded(String(file.parent?.path))){
@@ -144,12 +151,12 @@ export default class LocalImagesPlugin extends Plugin {
         this.onFCreateFunc(file)
       }
 
-    })
+    }))
 
 
     // Some file has been deleted
 
-    this.app.vault.on('delete', async (file: TFile) => {
+    this.registerEvent(this.app.vault.on('delete', async (file: TFile) => {
  
       if (!file ||
         !(file instanceof TFile) ||
@@ -183,11 +190,11 @@ export default class LocalImagesPlugin extends Plugin {
           return
         };
       }
-    })
+    }))
 
 
 
-    this.app.vault.on('rename', async (file: TFile, oldPath: string) => {
+    this.registerEvent(this.app.vault.on('rename', async (file: TFile, oldPath: string) => {
      
       if (!file ||
         !(file instanceof TFile) ||
@@ -232,13 +239,13 @@ export default class LocalImagesPlugin extends Plugin {
         this.app.vault.modify(file, content)
 
       }
-    })
+    }))
 
 
 
     // Some file has been modified
 
-    this.app.vault.on('modify', async (file: TFile) => {
+    this.registerEvent(this.app.vault.on('modify', async (file: TFile) => {
       if (!this.newfMoveReq)
         return
       logError("File modified: " + file.path , false)
@@ -259,19 +266,21 @@ export default class LocalImagesPlugin extends Plugin {
 
       }
 
-    })
+    }))
 
 
 
 
-    this.app.workspace.on(
+    this.registerEvent(this.app.workspace.on(
 
       "editor-paste",
       (evt: ClipboardEvent, editor: Editor, info: MarkdownView) => {
         this.onPasteFunc(evt, editor, info)
 
       }
-    )
+    ))
+
+    })
 
     this.setupQueueInterval()
     this.addSettingTab(new SettingTab(this.app, this))
@@ -337,28 +346,30 @@ export default class LocalImagesPlugin extends Plugin {
 
 
 
-    if (content != fixedContent[0] && fixedContent[1] === false) {
+    if (content != fixedContent[0]) {
       this.modifiedQueue.remove(file)
-      await this.app.vault.modify(file, fixedContent[0])
+
+      // Apply the replacements against the file's CURRENT content
+      // (vault.process is atomic) — downloads can take seconds, and the
+      // note may have been edited meanwhile by the user or another plugin.
+      const pairs: Array<[string, string]> = fixedContent[3] ?? []
+      await this.app.vault.process(file, (data: string) => {
+        let out = data
+        for (const [oldS, newS] of pairs) {
+          out = out.replaceAll(oldS, newS)
+        }
+        return out
+      })
 
       fixedContent[2].forEach((element: string) => {
         this.newfCreatedByDownloader.push(element)
       })
 
-      showBalloon(`Attachments for "${file.path}" were processed.`, this.settings.showNotifications)
-
-    }
-
-    else if (content != fixedContent[0] && fixedContent[1] === true) {
-
-      this.modifiedQueue.remove(file)
-      await this.app.vault.modify(file, fixedContent[0])
-
-      fixedContent[2].forEach((element: string) => {
-        this.newfCreatedByDownloader.push(element)
-      })
-
-      showBalloon(`WARNING!\r\nAttachments for "${file.path}" were processed, but some attachments were not downloaded/replaced...`, this.settings.showNotifications)
+      if (fixedContent[1] === false) {
+        showBalloon(`Attachments for "${file.path}" were processed.`, this.settings.showNotifications)
+      } else {
+        showBalloon(`WARNING!\r\nAttachments for "${file.path}" were processed, but some attachments were not downloaded/replaced...`, this.settings.showNotifications)
+      }
     }
     else {
       if (this.settings.showNotifications) {
@@ -838,6 +849,7 @@ export default class LocalImagesPlugin extends Plugin {
 
         const metaCache = this.app.metadataCache.getFileCache(note)
         let filedata = await this.app.vault.cachedRead(note)
+        const tagReplacements: Array<[string, string]> = []
         
 
         let pr = false
@@ -1026,7 +1038,7 @@ export default class LocalImagesPlugin extends Plugin {
               }
 
 
-              filedata = filedata.replaceAll(oldtag, newtag)
+              tagReplacements.push([oldtag, newtag])
               itemcount++
             }
           }
@@ -1034,7 +1046,14 @@ export default class LocalImagesPlugin extends Plugin {
 
         }
         if (itemcount > 0) {
-          await this.app.vault.modify(note, filedata)
+          // Atomic rewrite against current content — see processPage.
+          await this.app.vault.process(note, (data: string) => {
+            let out = data
+            for (const [oldS, newS] of tagReplacements) {
+              out = out.replaceAll(oldS, newS)
+            }
+            return out
+          })
           showBalloon(itemcount + " attachments for note " + note.path + " were processed.", this.settings.showNotifications)
           itemcount = 0
         }
@@ -1127,10 +1146,8 @@ export default class LocalImagesPlugin extends Plugin {
 
 
   async onunload() {
-    this.app.workspace.off("editor-drop", null)
-    this.app.workspace.off("editor-paste", null)
-    this.app.workspace.off('file-menu', null)
-    //this.app.vault.off("create",  null)
+    // Event handlers and intervals are registered via registerEvent /
+    // registerInterval, so Obsidian detaches them automatically on unload.
     logError(" unloaded.")
   }
 
