@@ -19,6 +19,7 @@ import {
 
 import {
   replaceAsync,
+  anyPatternMatches,
   cFileName,
   md5Sig,
   trimAny,
@@ -455,15 +456,12 @@ export default class LocalImagesPlugin extends Plugin {
 
 
 
-            for (const reg_p of MD_SEARCH_PATTERN) {
-              if (reg_p.test(cont)) {
-                logError("content: " + cont)
-                showBalloon("Media links were found, processing...", this.settings.showNotifications)
+            if (anyPatternMatches(MD_SEARCH_PATTERN, cont)) {
+              logError("content: " + cont)
+              showBalloon("Media links were found, processing...", this.settings.showNotifications)
 
-                this.enqueueActivePage(activeFile)
-                this.setupQueueInterval()
-                break
-              }
+              this.enqueueActivePage(activeFile)
+              this.setupQueueInterval()
             }
           }
           return
@@ -852,13 +850,7 @@ export default class LocalImagesPlugin extends Plugin {
         const tagReplacements: Array<[string, string]> = []
         
 
-        let pr = false
-        for (const reg_p of MD_SEARCH_PATTERN) {
-          if (reg_p.test(filedata)) {
-            pr = true
-            break
-          }
-        }
+        const pr = anyPatternMatches(MD_SEARCH_PATTERN, filedata)
 
  
 

@@ -121,6 +121,10 @@ export async function replaceAsync(str: any, regex: Array<RegExp>, asyncFn: any)
 
   regex.forEach((element) => {
     logError("cur regex:  " + element);
+    // The patterns are shared module constants: any earlier .test()/.exec()
+    // call leaves lastIndex mid-string, and matchAll clones inherit it —
+    // silently skipping every tag before that offset.
+    element.lastIndex = 0;
     const matches = str.matchAll(element);
 
     for (const match of matches) {
@@ -161,7 +165,10 @@ export async function replaceAsync(str: any, regex: Array<RegExp>, asyncFn: any)
   })
 
   const limit = pLimit(PROCESS_CONCURRENCY);
-  for (var key in dictPatt) {
+  // `const` is load-bearing: limit() defers the closure past this iteration,
+  // and a function-scoped `var key` would have advanced to the last tag by
+  // the time queued tasks run.
+  for (const key in dictPatt) {
     const args = dictPatt[key];
     const promise = limit(() => asyncFn(key, args[0], args[1], args[2], args[3]));
     promises.push(promise);
@@ -192,6 +199,21 @@ export async function replaceAsync(str: any, regex: Array<RegExp>, asyncFn: any)
   });
 
   return [str, errorflag, filesArr, pairs];
+}
+
+// State-safe match detection over shared /g pattern constants: .test() on a
+// /g regex advances its lastIndex, corrupting later scans that reuse the
+// same object. Always reset around the probe.
+export function anyPatternMatches(patterns: Array<RegExp>, text: string): boolean {
+  for (const p of patterns) {
+    p.lastIndex = 0;
+    const hit = p.test(text);
+    p.lastIndex = 0;
+    if (hit) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function isUrl(link: string) {
